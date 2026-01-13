@@ -120,20 +120,25 @@ Definiuje parametry konkretnej wysyłki danych:
 
 ## 3. Przekazywanie zdarzeń audytowych w czasie rzeczywistym
 
-Na maszynie klienckiej skonfigurowano auditd w trybie niezmiennym (immutable).
-Poprawność działania potwierdzono poleceniem `auditctl -s` (`enabled = 2`).
+Na maszynie klienckiej skonfigurowano zaawansowany mechanizm audytu systemowego oparty o usługę auditd, działającą w trybie niezmiennym (immutable), zgodnie z wymaganiami CIS. Poprawność działania mechanizmu audytu została potwierdzona poleceniem auditctl -s, które wykazało aktywny audyt w trybie wymuszonym (enabled = 2).
 
 ![Status auditctl -s](sec14.png)
+
+W celu umożliwienia przekazywania zdarzeń audytowych poza system lokalny, wykorzystano wbudowaną integrację auditd z mechanizmem syslog. System audytu został skonfigurowany do eksportowania zdarzeń poprzez plugin builtin_syslog, co potwierdzono analizą pliku konfiguracyjnego /etc/audit/plugins.d/syslog.conf, w którym ustawiono parametr active = yes. Takie podejście pozwala na przekazywanie zdarzeń audytowych bezpośrednio do systemowego mechanizmu logowania.
 
 W celu przekazywania zdarzeń poza system lokalny, wykorzystano plugin `builtin_syslog`.
 *Weryfikacja:* Plik `/etc/audit/plugins.d/syslog.conf` (`active = yes`).
 
 ![Konfiguracja pluginu syslog](sec15.png)
 
+Zdarzenia przekazane do sysloga są następnie rejestrowane w systemie journald, który został skonfigurowany do dalszego przekazywania logów do usługi RSyslog. Ustawienie to zostało zweryfikowane poprzez sprawdzenie parametru ForwardToSyslog=yes w pliku /etc/systemd/journald.conf. Dzięki temu journald pełni rolę pośrednika, zapewniając spójność i buforowanie zdarzeń systemowych.
+
 Zdarzenia są rejestrowane w journald (forwarding włączony):
 *Weryfikacja:* `grep "^ForwardToSyslog=yes" /etc/systemd/journald.conf`
 
 ![Weryfikacja ForwardToSyslog](sec16.png)
+
+Usługa RSyslog została skonfigurowana do pobierania zdarzeń z journald przy użyciu modułu imjournal, co potwierdzono obecnością dyrektywy module(load="imjournal") w plikach konfiguracyjnych RSyslog. Mechanizm ten umożliwia przechwytywanie zdarzeń audytowych w czasie rzeczywistym, bezpośrednio po ich zapisaniu w journald.
 
 Usługa RSyslog pobiera zdarzenia z journald przy użyciu modułu `imjournal`.
 *Weryfikacja:* `grep -R "imjournal" /etc/rsyslog.conf /etc/rsyslog.d/*.conf`
@@ -144,12 +149,21 @@ Usługa RSyslog pobiera zdarzenia z journald przy użyciu modułu `imjournal`.
 
 ## 4. Konfiguracja Odbiorcy (RHEL 10)
 
-Odbiorca nasłuchuje na dedykowanym, bezpiecznym porcie 6514/TCP. Konfiguracja znajduje się w `/etc/rsyslog.d/remote.conf`.
+**Plik:** `/etc/rsyslog.d/remote.conf`
 
-**Kluczowe elementy:**
-* `module(load="imtcp" ...)`: Obsługa TLS, autoryzacja "anon" (sprawdzenie podpisu CA).
-* `input(type="imtcp" port="6514")`: Otwarcie gniazda.
-* **Szablony dynamiczne:** Rozdzielanie logów na katalogi per maszyna (`%HOSTNAME%`) i pliki per program (`%PROGRAMNAME%`).
+Odbiorca nasłuchuje na dedykowanym bezpiecznym porcie 6514/TCP. Ten plik zamienia serwer w "bezpieczną bazę" przyjmującą dane:
+
+- **module(load="imtcp" ...):** Ładuje moduł wejścia (Input Module TCP) z obsługą TLS.
+- **StreamDriver.Authmode="anon":** Oznacza autoryzację anonimową w kontekście nazwy. Serwer sprawdzi, czy Nadawca ma ważny certyfikat podpisany przez wspólne CA, ale nie będzie sprawdzał konkretnego "imienia" (CN) klienta. Pozwala to na łatwe dołączanie wielu klientów bez zmiany konfiguracji serwera.
+- **input(type="imtcp" port="6514"):** Otwiera "gniazdo" (socket) i czeka na przychodzące bezpieczne połączenia.
+
+### 4.1. Szablony Dynamiczne
+
+Zastosowano sposób zapisu danych:
+
+- **%HOSTNAME%:** RSyslog automatycznie tworzy podfolder o nazwie maszyny nadawcy (np. `/Nadawca-BSI/`).
+- **%PROGRAMNAME%:** Rozdziela logi na osobne pliki (np. `sudo.log`, `useradd.log`), co znacząco ułatwia audyt.
+- **action(type="omfile" dynaFile="RemoteLogs"):** Przekazuje rsyslogowi, aby wszystkie odebrane logi zapisał na dysku, używając powyższego szablonu dynamicznego.
 
 ![Plik remote.conf](sec18.png)
 
@@ -159,22 +173,49 @@ Odbiorca nasłuchuje na dedykowanym, bezpiecznym porcie 6514/TCP. Konfiguracja z
 
 Przeprowadzono testy "end-to-end" potwierdzające działanie łańcucha logowania.
 
-### 1. Akcja na Nadawcy: Utworzenie użytkownika
-Wykonano komendę: `sudo useradd projekt_bsi`.
-*Mechanizm:* Kernel -> Auditd -> Journald -> RSyslog (TLS) -> Odbiorca.
-*Weryfikacja u Odbiorcy:* Sprawdzono plik `/var/log/remote/Nadawca-BSI/useradd.log`.
+### 1. Akcja na Nadawcy
+
+Wykonano komendę `sudo useradd projekt_bsi`.
+
+**Mechanizm:**  
+Jądro systemu wygenerowało zdarzenie audytowe, które zostało przechwycone przez mechanizm `auditd`, następnie przekazane do systemu `journald` i obsłużone przez usługę RSyslog, która wysłała je tunelem TLS do serwera centralnego.
+
+**Weryfikacja u Odbiorcy:**  
+- Sprawdzono katalog `/var/log/remote/Nadawca-BSI/`.
+- Potwierdzono obecność pliku `useradd.log` z wpisem o stworzeniu użytkownika.
+
 
 ![Log useradd na serwerze](sec19.png)
 
-### 2. Akcja na Nadawcy: Eskalacja uprawnień
-Wykonano komendę: `sudo -i`.
-*Weryfikacja u Odbiorcy:* Potwierdzono obecność wpisu w pliku `/var/log/remote/Nadawca-BSI/sudo.log`.
+### 2. Akcja na Nadawcy (eskalacja uprawnień)
+
+Wykonano polecenie: `sudo -i`
+
+**Mechanizm:**  
+Użycie polecenia sudo wygenerowało zdarzenie audytowe związane z eskalacją uprawnień. Zdarzenie zostało przechwycone przez RSyslog i przesłane szyfrowanym kanałem TLS do serwera centralnego.
+
+**Weryfikacja u Odbiorcy:**  
+Potwierdzono obecność wpisu dotyczącego użycia polecenia sudo w pliku:  
+`/var/log/remote/Nadawca-BSI/sudo.log`
+
 
 ![Log sudo na serwerze](sec20.png)
 
-### 3. Akcja na Nadawcy: Test manualny (logger)
-Wykonano komendę: `logger -p authpriv.notice "BSI test – zdarzenie audytowe logger"`.
-*Weryfikacja u Odbiorcy:* Potwierdzono obecność wpisu testowego w pliku `/var/log/remote/Nadawca-BSI/root.log`.
+### 3. Akcja na Nadawcy (test manualny – logger)
+
+Wykonano polecenie:  
+`logger -p authpriv.notice "BSI test – zdarzenie audytowe logger"`
+
+**Mechanizm:**  
+Polecenie logger wygenerowało wpis w mechanizmie syslog, który został przechwycony przez system journald, a następnie obsłużony przez usługę RSyslog. Zdarzenie zostało przesłane w czasie rzeczywistym do centralnego serwera logów przy użyciu szyfrowanego połączenia TLS.
+
+**Weryfikacja u Odbiorcy:**  
+Sprawdzono logi zapisane w katalogu:  
+`/var/log/remote/Nadawca-BSI/`  
+
+Potwierdzono obecność wpisu testowego w pliku:  
+`root.log`
+
 
 ![Log logger na serwerze](sec21.png)
 
@@ -184,4 +225,5 @@ Wykonano komendę: `logger -p authpriv.notice "BSI test – zdarzenie audytowe l
 
 
 Zadanie wykonano zgodnie z wymogami bezpieczeństwa. Połączenie jest odporne na podsłuch (szyfrowanie TLS) oraz na próby podszycia się pod serwer logów. Logi są składowane w sposób scentralizowany i uporządkowany, co spełnia rygorystyczne normy CIS.
+
 
