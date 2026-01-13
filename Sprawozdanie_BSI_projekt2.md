@@ -92,14 +92,27 @@ Zablokowano możliwość zmiany reguł audytu bez restartu systemu (parametr `-e
 
 ## 2. Konfiguracja RSyslog do pracy z TLS (Sekcja 6.2.3.6)
 
-Ten etap odpowiada za bezpieczne "wypchnięcie" logów na zewnątrz. Konfiguracja po stronie Nadawcy (Rocky 10) znajduje się w pliku `/etc/rsyslog.d/90-forwarding.conf`.
+Ten etap odpowiada za bezpieczne "wypchnięcie" logów na zewnątrz. Konfiguracja po stronie Nadawcy (Rocky 10) dzieli się na dwa główne bloki.
 
-**Kluczowe elementy konfiguracji:**
-* **DefaultNetstreamDriver="gtls":** Użycie sterownika GnuTLS.
-* **Certyfikaty:** Wskazanie CA (`ca.crt`) oraz certyfikatu/klucza klienta (`client.crt`, `client.key`).
-* **Target:** Adres IP serwera (192.168.0.142), port 6514.
-* **StreamDriverMode="1":** Wymuszenie szyfrowania.
-* **StreamDriverAuthMode="x509/name":** Weryfikacja tożsamości serwera.
+**Plik:** `/etc/rsyslog.d/90-forwarding.conf`
+
+### 2.1. Blok Globalny (global)
+
+Odpowiada za ustawienia wspólne dla całego procesu rsyslog:
+
+- **DefaultNetstreamDriver="gtls":** Definiuje użycie sterownika GnuTLS. Jest to niezbędne, aby rsyslog potrafił obsługiwać szyfrowanie (standardowy sterownik obsługuje tylko czysty tekst).
+- **DefaultNetstreamDriverCAFile:** Wskazuje na "zaufany urząd" (Root CA). To ten plik sprawdza, czy certyfikat serwera jest autentyczny.
+- **DefaultNetstreamDriverCertFile / KeyFile:** Dokumenty tożsamości (certyfikat i klucz prywatny), którymi Nadawca przedstawia się Serwerowi.
+
+### 2.2. Blok Akcji (action)
+
+Definiuje parametry konkretnej wysyłki danych:
+
+- **type="omfwd":** Akcja wysyłki (Output Module Forward).
+- **target / port / protocol:** Adres IP serwera, port TLS (6514) i protokół TCP.
+- **StreamDriverMode="1":** Wymusza tryb TLS. Zapobiega to przesyłaniu logów tekstem jawnym, jeśli serwer by na to pozwolił.
+- **StreamDriverAuthMode="x509/name":** Najwyższy tryb weryfikacji. Nadawca sprawdza podpis CA oraz czy nazwa w certyfikacie zgadza się z listą dozwolonych partnerów.
+- **StreamDriverPermittedPeers="nadawca-rocky10":** Jeśli serwer przedstawi certyfikat z inną nazwą, połączenie zostanie zerwane w obawie przed atakiem typu Man-in-the-Middle.
 
 ![Plik 90-forwarding.conf](sec13.png)
 
@@ -171,3 +184,4 @@ Wykonano komendę: `logger -p authpriv.notice "BSI test – zdarzenie audytowe l
 
 
 Zadanie wykonano zgodnie z wymogami bezpieczeństwa. Połączenie jest odporne na podsłuch (szyfrowanie TLS) oraz na próby podszycia się pod serwer logów. Logi są składowane w sposób scentralizowany i uporządkowany, co spełnia rygorystyczne normy CIS.
+
